@@ -1,0 +1,567 @@
+diff --git a/contrib/satellite-network/CMakeLists.txt b/contrib/satellite-network/CMakeLists.txt
+index 413868d..efd9a63 100644
+--- a/contrib/satellite-network/CMakeLists.txt
++++ b/contrib/satellite-network/CMakeLists.txt
+@@ -1,6 +1,7 @@
+ build_lib(
+   LIBNAME satellite-network
+   SOURCE_FILES
++    helper/link-scenario-helper.cc
+     model/point-to-point-laser-net-device.cc
+     model/point-to-point-laser-channel.cc
+     model/gsl-net-device.cc
+@@ -14,6 +15,7 @@ build_lib(
+     helper/arbiter-single-forward-helper.cc
+     helper/gsl-if-bandwidth-helper.cc
+   HEADER_FILES
++    helper/link-scenario-helper.h
+     model/point-to-point-laser-net-device.h
+     model/point-to-point-laser-channel.h
+     model/gsl-net-device.h
+diff --git a/contrib/satellite-network/helper/link-scenario-helper.cc b/contrib/satellite-network/helper/link-scenario-helper.cc
+new file mode 100644
+index 0000000..a36e5e6
+--- /dev/null
++++ b/contrib/satellite-network/helper/link-scenario-helper.cc
+@@ -0,0 +1,270 @@
++#include "link-scenario-helper.h"
++#include "ns3/gsl-net-device.h"
++#include "ns3/point-to-point-laser-net-device.h"
++#include "ns3/simulator.h"
++#include "ns3/tag.h"
++#include <algorithm>
++#include <cmath>
++#include <filesystem>
++#include <iomanip>
++#include <limits>
++#include <sstream>
++#include <stdexcept>
++
++namespace ns3 {
++LinkScenarioHelper* LinkScenarioHelper::m_active = nullptr;
++namespace {
++// Packet tags are simulator metadata: endpoint context does not consume link bandwidth.
++class ScenarioHopTag : public Tag {
++public:
++    uint32_t sender = 0;
++    uint64_t transmitNs = 0;
++    static TypeId GetTypeId() {
++        static TypeId tid = TypeId("ns3::ScenarioHopTag").SetParent<Tag>().AddConstructor<ScenarioHopTag>();
++        return tid;
++    }
++    TypeId GetInstanceTypeId() const override { return GetTypeId(); }
++    uint32_t GetSerializedSize() const override { return 12; }
++    void Serialize(TagBuffer b) const override { b.WriteU32(sender); b.WriteU64(transmitNs); }
++    void Deserialize(TagBuffer b) override { sender = b.ReadU32(); transmitNs = b.ReadU64(); }
++    void Print(std::ostream& out) const override { out << sender << '@' << transmitNs; }
++};
++std::string Trim(const std::string& s) {
++    auto first = s.find_first_not_of(" \t\r\n");
++    return first == std::string::npos ? "" : s.substr(first, s.find_last_not_of(" \t\r\n") - first + 1);
++}
++std::vector<std::string> Fields(const std::string& line) {
++    std::vector<std::string> result;
++    std::stringstream stream(line);
++    std::string field;
++    while (std::getline(stream, field, ',')) result.push_back(Trim(field));
++    return result;
++}
++double Number(const std::string& s) {
++    size_t end;
++    double value = std::stod(s, &end);
++    if (end != s.size() || !std::isfinite(value) || value < 0) throw std::runtime_error("Invalid nonnegative number: " + s);
++    return value;
++}
++uint32_t NodeId(const std::string& s, uint32_t count) {
++    double value = Number(s);
++    if (value >= count || value != std::floor(value)) throw std::runtime_error("Invalid node id: " + s);
++    return static_cast<uint32_t>(value);
++}
++std::string Resolve(Ptr<BasicSimulation> sim, const std::string& path) {
++    auto p = std::filesystem::path(path);
++    return (p.is_absolute() ? p : std::filesystem::path(sim->GetRunDir()) / p).string();
++}
++DataRate Rate(Ptr<NetDevice> device) {
++    if (auto gsl = DynamicCast<GSLNetDevice>(device)) return gsl->GetEffectiveDataRate();
++    return DynamicCast<PointToPointLaserNetDevice>(device)->GetEffectiveDataRate();
++}
++}
++
++LinkScenarioHelper::LinkScenarioHelper(Ptr<BasicSimulation> sim, Ptr<TopologySatelliteNetwork> topology)
++    : m_simulation(sim), m_topology(topology) {
++    auto capacity = sim->GetConfigParamOrDefault("link_congestion_scenario_file", "");
++    auto loss = sim->GetConfigParamOrDefault("link_loss_state_dir", "");
++    double interval = Number(sim->GetConfigParamOrDefault("link_scenario_log_interval_ms", "10"));
++    if (interval <= 0 || interval > 1000) throw std::runtime_error("Log interval must be in (0,1000] ms");
++    m_interval = NanoSeconds(std::llround(interval * 1e6));
++    if (m_interval.IsZero()) throw std::runtime_error("Log interval is below 1 ns");
++    if (!capacity.empty()) {
++        m_capacityLog.open(sim->GetLogsDir() + "/scenario_capacity.csv");
++        m_queueLog.open(sim->GetLogsDir() + "/scenario_queues.csv");
++        m_dropLog.open(sim->GetLogsDir() + "/scenario_queue_drops.csv");
++        m_capacityLog << "time_ns,node,device,cap_bps,effective_bps\n";
++        m_queueLog << "time_ns,node,device,packets,bytes,effective_bps\n";
++        m_dropLog << "time_ns,node,device,bytes\n";
++        ReadCapacity(Resolve(sim, capacity));
++    }
++    if (!loss.empty()) {
++        ReadLoss(Resolve(sim, loss));
++        if (m_active) throw std::runtime_error("Only one link scenario per simulation is supported");
++        m_active = this;
++    }
++    // Time-zero caps must take effect before the first occupancy/rate sample.
++    if (!capacity.empty() || !loss.empty()) Simulator::ScheduleNow(&LinkScenarioHelper::Sample, this, true);
++}
++
++LinkScenarioHelper::~LinkScenarioHelper() {
++    if (m_active == this) m_active = nullptr;
++}
++
++void LinkScenarioHelper::ReadLoss(const std::string& directory) {
++    auto config = read_config(directory + "/loss_model.properties");
++    auto get = [&](const std::string& key) { return config.at(key); };
++    if (get("format_version") != "1" || Number(get("num_satellites")) != m_topology->GetNumSatellites())
++        throw std::runtime_error("Loss state version/constellation mismatch");
++    double duration = Number(get("duration_ns"));
++    if (duration < m_simulation->GetSimulationEndTimeNs() || duration >= 9e18)
++        throw std::runtime_error("Loss state duration does not cover simulation or is out of range");
++    m_baseLoss = Number(get("base_loss_probability"));
++    m_peakLoss = Number(get("peak_loss_probability"));
++    if (m_baseLoss > m_peakLoss || m_peakLoss > 1) throw std::runtime_error("Require 0 <= base loss <= peak loss <= 1");
++    for (const auto& type : Fields(get("link_types"))) {
++        if (type == "isl") m_lossIsl = true;
++        else if (type == "gsl") m_lossGsl = true;
++        else throw std::runtime_error("Unknown loss link type: " + type);
++    }
++    m_lossEvents.resize(m_topology->GetNumSatellites());
++    std::ifstream stream(directory + "/loss_events.csv");
++    if (!stream) throw std::runtime_error("Cannot read loss_events.csv");
++    std::string line;
++    while (std::getline(stream, line)) {
++        line = Trim(line);
++        if (line.empty() || line[0] == '#') continue;
++        auto f = Fields(line);
++        if (f.size() != 3) throw std::runtime_error("Expected satellite,start_ns,end_ns");
++        auto node = NodeId(f[0], m_topology->GetNumSatellites());
++        double start = Number(f[1]), end = Number(f[2]);
++        if (start >= end || end > duration || start != std::floor(start) || end != std::floor(end))
++            throw std::runtime_error("Invalid loss event interval");
++        auto& events = m_lossEvents[node];
++        if (!events.empty() && start < events.back().second) throw std::runtime_error("Loss events must be ordered and nonoverlapping per satellite");
++        events.emplace_back(static_cast<int64_t>(start), static_cast<int64_t>(end));
++    }
++    m_lossLog.open(m_simulation->GetLogsDir() + "/scenario_link_loss.csv");
++    m_lossDropLog.open(m_simulation->GetLogsDir() + "/scenario_link_drops.csv");
++    m_lossLog << "start_ns,end_ns,src,dst,attempts,drops,peak_attempts,expected_drops\n";
++    m_lossDropLog << "time_ns,src,dst,bytes,probability,peak\n";
++    m_lossLog << std::setprecision(17);
++    m_lossDropLog << std::setprecision(17);
++}
++
++bool LinkScenarioHelper::InPeak(uint32_t node, int64_t time) const {
++    if (node >= m_lossEvents.size()) return false;
++    const auto& events = m_lossEvents[node];
++    auto it = std::upper_bound(events.begin(), events.end(), std::make_pair(time, std::numeric_limits<int64_t>::max()));
++    return it != events.begin() && time < std::prev(it)->second;
++}
++
++Ptr<Packet> LinkScenarioHelper::CopyForReceive(Ptr<const Packet> packet, uint32_t sender) {
++    auto copy = packet->Copy();
++    if (m_active) {
++        ScenarioHopTag tag;
++        copy->RemovePacketTag(tag);
++        tag.sender = sender;
++        tag.transmitNs = Simulator::Now().GetNanoSeconds();
++        copy->AddPacketTag(tag);
++    }
++    return copy;
++}
++
++bool LinkScenarioHelper::ShouldDrop(uint32_t receiver, Ptr<Packet> packet) {
++    if (!m_active) return false;
++    auto& self = *m_active;
++    ScenarioHopTag tag;
++    if (!packet->RemovePacketTag(tag)) throw std::runtime_error("Missing link scenario packet context");
++    bool isl = tag.sender < self.m_lossEvents.size() && receiver < self.m_lossEvents.size();
++    if (!(isl ? self.m_lossIsl : self.m_lossGsl)) return false;
++    int64_t now = Simulator::Now().GetNanoSeconds();
++    bool peak = self.InPeak(tag.sender, tag.transmitNs) || self.InPeak(receiver, now);
++    double p = peak ? self.m_peakLoss : self.m_baseLoss;
++    auto& count = self.m_lossCounts[{tag.sender, receiver}];
++    ++count.attempts;
++    count.peakAttempts += peak;
++    count.expected += p;
++    bool drop = p == 1;
++    if (p > 0 && p < 1) {
++        if (!count.random) {
++            count.random = CreateObject<UniformRandomVariable>();
++            // Independent directed-link streams; TCP arrival order cannot shift other links' draws.
++            count.random->SetStream(1000000 + int64_t(tag.sender) * self.m_topology->GetNumNodes() + receiver);
++        }
++        drop = count.random->GetValue() < p;
++    }
++    if (drop) {
++        ++count.drops;
++        self.m_lossDropLog << now << ',' << tag.sender << ',' << receiver << ',' << packet->GetSize() << ',' << p << ',' << peak << '\n';
++    }
++    return drop;
++}
++
++void LinkScenarioHelper::ReadCapacity(const std::string& path) {
++    std::ifstream stream(path);
++    if (!stream) throw std::runtime_error("Cannot read congestion scenario: " + path);
++    std::string line;
++    while (std::getline(stream, line)) {
++        line = Trim(line);
++        if (line.empty() || line[0] == '#') continue;
++        auto f = Fields(line);
++        if (f.size() != 6) throw std::runtime_error("Expected node,type,peer,start_s,end_s,mbps: " + line);
++        uint32_t node = NodeId(f[0], m_topology->GetNumNodes());
++        if (f[1] != "isl" && f[1] != "gsl") throw std::runtime_error("Link type must be isl or gsl");
++        if (f[1] == "gsl" && f[2] != "*") throw std::runtime_error("GSL limits apply to whole interfaces; use peer *");
++        int64_t peer = f[2] == "*" ? -1 : static_cast<int64_t>(NodeId(f[2], m_topology->GetNumNodes()));
++        double start = Number(f[3]), end = Number(f[4]), mbps = Number(f[5]);
++        if (start >= end || end > m_simulation->GetSimulationEndTimeNs() / 1e9 || mbps <= 0 || mbps > 1e6)
++            throw std::runtime_error("Invalid capacity interval/rate: " + line);
++        auto startNs = std::llround(start * 1e9), endNs = std::llround(end * 1e9);
++        uint64_t rate = std::llround(mbps * 1e6);
++        if (!rate || startNs >= endNs) throw std::runtime_error("Capacity interval/rate below simulator resolution");
++        auto n = m_topology->GetNodes().Get(node);
++        unsigned matched = 0;
++        for (uint32_t d = 0; d < n->GetNDevices(); ++d) {
++            auto device = n->GetDevice(d);
++            auto gsl = DynamicCast<GSLNetDevice>(device);
++            auto isl = DynamicCast<PointToPointLaserNetDevice>(device);
++            if ((f[1] == "gsl" && !gsl) || (f[1] == "isl" && !isl)) continue;
++            if (peer >= 0) {
++                auto channel = device->GetChannel();
++                bool found = false;
++                for (size_t j = 0; j < channel->GetNDevices(); ++j)
++                    if (channel->GetDevice(j) != device && channel->GetDevice(j)->GetNode()->GetId() == static_cast<uint32_t>(peer)) found = true;
++                if (!found) continue;
++            }
++            auto key = std::make_pair(node, d);
++            if (!m_targets.count(key)) {
++                auto queue = gsl ? gsl->GetQueue() : isl->GetQueue();
++                m_targets.emplace(key, Target{device, queue, {}});
++                queue->TraceConnectWithoutContext("Drop", MakeBoundCallback(&LinkScenarioHelper::QueueDrop, this, node, d));
++            }
++            Simulator::Schedule(NanoSeconds(startNs), &LinkScenarioHelper::ChangeCap, this, node, d, rate, true);
++            Simulator::Schedule(NanoSeconds(endNs), &LinkScenarioHelper::ChangeCap, this, node, d, rate, false);
++            ++matched;
++        }
++        if (!matched) throw std::runtime_error("No interfaces match: " + line);
++    }
++}
++
++void LinkScenarioHelper::ChangeCap(uint32_t node, uint32_t d, uint64_t rate, bool start) {
++    auto& target = m_targets.at({node, d});
++    if (start) target.caps.insert(rate);
++    else target.caps.erase(target.caps.find(rate));
++    DataRate cap(target.caps.empty() ? 0 : *target.caps.begin());
++    if (auto gsl = DynamicCast<GSLNetDevice>(target.device)) gsl->SetScenarioRateCap(cap);
++    else DynamicCast<PointToPointLaserNetDevice>(target.device)->SetScenarioRateCap(cap);
++    m_capacityLog << Simulator::Now().GetNanoSeconds() << ',' << node << ',' << d << ','
++                  << cap.GetBitRate() << ',' << Rate(target.device).GetBitRate() << '\n';
++}
++
++void LinkScenarioHelper::QueueDrop(LinkScenarioHelper* self, uint32_t node, uint32_t device, Ptr<const Packet> packet) {
++    self->m_dropLog << Simulator::Now().GetNanoSeconds() << ',' << node << ',' << device << ',' << packet->GetSize() << '\n';
++}
++
++void LinkScenarioHelper::Sample(bool again) {
++    for (auto& [key, target] : m_targets) {
++        m_queueLog << Simulator::Now().GetNanoSeconds() << ',' << key.first << ',' << key.second << ','
++                   << target.queue->GetNPackets() << ',' << target.queue->GetNBytes() << ',' << Rate(target.device).GetBitRate() << '\n';
++    }
++    int64_t now = Simulator::Now().GetNanoSeconds();
++    for (auto& [key, count] : m_lossCounts) {
++        if (count.attempts) {
++            m_lossLog << m_lastSample << ',' << now << ',' << key.first << ',' << key.second << ','
++                      << count.attempts << ',' << count.drops << ',' << count.peakAttempts << ',' << count.expected << '\n';
++            count.attempts = count.drops = count.peakAttempts = 0;
++            count.expected = 0;
++        }
++    }
++    m_lastSample = now;
++    if (again && Simulator::Now() + m_interval < NanoSeconds(m_simulation->GetSimulationEndTimeNs()))
++        Simulator::Schedule(m_interval, &LinkScenarioHelper::Sample, this, true);
++}
++
++void LinkScenarioHelper::Finish() {
++    if (!m_targets.empty() || m_active == this) Sample(false);
++    m_capacityLog.flush(); m_queueLog.flush(); m_dropLog.flush();
++    m_lossLog.flush(); m_lossDropLog.flush();
++}
++}
+diff --git a/contrib/satellite-network/helper/link-scenario-helper.h b/contrib/satellite-network/helper/link-scenario-helper.h
+new file mode 100644
+index 0000000..e5877dc
+--- /dev/null
++++ b/contrib/satellite-network/helper/link-scenario-helper.h
+@@ -0,0 +1,52 @@
++#ifndef LINK_SCENARIO_HELPER_H
++#define LINK_SCENARIO_HELPER_H
++
++#include "ns3/basic-simulation.h"
++#include "ns3/topology-satellite-network.h"
++#include "ns3/random-variable-stream.h"
++#include <fstream>
++#include <map>
++#include <set>
++
++namespace ns3 {
++
++class LinkScenarioHelper {
++public:
++    LinkScenarioHelper(Ptr<BasicSimulation> simulation, Ptr<TopologySatelliteNetwork> topology);
++    ~LinkScenarioHelper();
++    void Finish();
++    static Ptr<Packet> CopyForReceive(Ptr<const Packet> packet, uint32_t sender);
++    static bool ShouldDrop(uint32_t receiver, Ptr<Packet> packet);
++
++private:
++    struct Target {
++        Ptr<NetDevice> device;
++        Ptr<Queue<Packet>> queue;
++        std::multiset<uint64_t> caps;
++    };
++    Ptr<BasicSimulation> m_simulation;
++    Ptr<TopologySatelliteNetwork> m_topology;
++    std::map<std::pair<uint32_t, uint32_t>, Target> m_targets;
++    Time m_interval;
++    std::ofstream m_capacityLog, m_queueLog, m_dropLog;
++    static LinkScenarioHelper* m_active;
++    struct LossCount {
++        uint64_t attempts = 0, drops = 0, peakAttempts = 0;
++        double expected = 0;
++        Ptr<UniformRandomVariable> random;
++    };
++    std::map<std::pair<uint32_t, uint32_t>, LossCount> m_lossCounts;
++    std::vector<std::vector<std::pair<int64_t, int64_t>>> m_lossEvents;
++    bool m_lossIsl = false, m_lossGsl = false;
++    double m_baseLoss = 0, m_peakLoss = 0;
++    int64_t m_lastSample = 0;
++    std::ofstream m_lossLog, m_lossDropLog;
++    void ReadLoss(const std::string& directory);
++    bool InPeak(uint32_t node, int64_t time) const;
++    void ReadCapacity(const std::string& path);
++    void ChangeCap(uint32_t node, uint32_t device, uint64_t rate, bool start);
++    void Sample(bool again);
++    static void QueueDrop(LinkScenarioHelper* self, uint32_t node, uint32_t device, Ptr<const Packet> packet);
++};
++}
++#endif
+diff --git a/contrib/satellite-network/model/gsl-channel.cc b/contrib/satellite-network/model/gsl-channel.cc
+index ed54e1d..fd95b62 100644
+--- a/contrib/satellite-network/model/gsl-channel.cc
++++ b/contrib/satellite-network/model/gsl-channel.cc
+@@ -22,6 +22,7 @@
+ 
+ 
+ #include "gsl-channel.h"
++#include "ns3/link-scenario-helper.h"
+ #include "ns3/core-module.h"
+ #include "ns3/abort.h"
+ #ifdef NS3_MPI
+@@ -109,7 +110,7 @@ GSLChannel::TransmitTo(Ptr<const Packet> p, Ptr<GSLNetDevice> srcNetDevice, Ptr<
+           txTime + delay,
+           &GSLNetDevice::Receive,
+           destNetDevice,
+-          p->Copy ()
++          LinkScenarioHelper::CopyForReceive(p, srcNetDevice->GetNode()->GetId())
+   );
+ 
+   // Re-enabled below code if distributed is again enabled:
+diff --git a/contrib/satellite-network/model/gsl-net-device.cc b/contrib/satellite-network/model/gsl-net-device.cc
+index 52511ca..3a36b67 100644
+--- a/contrib/satellite-network/model/gsl-net-device.cc
++++ b/contrib/satellite-network/model/gsl-net-device.cc
+@@ -33,6 +33,7 @@
+ #include "ns3/ppp-header.h"
+ #include "ns3/node-container.h"
+ #include "gsl-net-device.h"
++#include "ns3/link-scenario-helper.h"
+ #include "gsl-channel.h"
+ 
+ namespace ns3 {
+@@ -241,6 +242,19 @@ GSLNetDevice::SetInterframeGap (Time t)
+   m_tInterframeGap = t;
+ }
+ 
++void
++GSLNetDevice::SetScenarioRateCap (DataRate bps)
++{
++  m_scenarioRateCap = bps;
++}
++
++DataRate
++GSLNetDevice::GetEffectiveDataRate () const
++{
++  // GSL state reloads still update m_bps; they must not erase an active cap.
++  return m_scenarioRateCap.GetBitRate() && m_scenarioRateCap < m_bps ? m_scenarioRateCap : m_bps;
++}
++
+ bool
+ GSLNetDevice::TransmitStart (Ptr<Packet> p, const Address dest)
+ {
+@@ -257,7 +271,7 @@ GSLNetDevice::TransmitStart (Ptr<Packet> p, const Address dest)
+   m_currentPkt = p;
+   m_phyTxBeginTrace (m_currentPkt);
+ 
+-  Time txTime = m_bps.CalculateBytesTxTime (p->GetSize ());
++  Time txTime = GetEffectiveDataRate().CalculateBytesTxTime (p->GetSize ());
+   Time txCompleteTime = txTime + m_tInterframeGap;
+ 
+   NS_LOG_LOGIC ("Schedule TransmitCompleteEvent in " << txCompleteTime.GetSeconds () << "sec");
+@@ -347,7 +361,8 @@ GSLNetDevice::Receive (Ptr<Packet> packet)
+   NS_LOG_FUNCTION (this << packet << this->GetNode()->GetId());
+   uint16_t protocol = 0;
+ 
+-  if (m_receiveErrorModel && m_receiveErrorModel->IsCorrupt (packet) ) 
++  if (LinkScenarioHelper::ShouldDrop(GetNode()->GetId(), packet) ||
++      (m_receiveErrorModel && m_receiveErrorModel->IsCorrupt (packet)))
+     {
+       // 
+       // If we have an error model and it indicates that it is time to lose a
+diff --git a/contrib/satellite-network/model/gsl-net-device.h b/contrib/satellite-network/model/gsl-net-device.h
+index 1dba2d9..d031a8a 100644
+--- a/contrib/satellite-network/model/gsl-net-device.h
++++ b/contrib/satellite-network/model/gsl-net-device.h
+@@ -87,6 +87,8 @@ public:
+    * \param bps the data rate at which this object operates
+    */
+   void SetDataRate (DataRate bps);
++  void SetScenarioRateCap (DataRate bps);
++  DataRate GetEffectiveDataRate () const;
+ 
+   /**
+    * Set the interframe gap used to separate packets.  The interframe gap
+@@ -289,6 +291,7 @@ private:
+    * timing.
+    */
+   DataRate       m_bps;
++  DataRate       m_scenarioRateCap {0}; // Zero means no scenario limit.
+ 
+   /**
+    * The interframe gap that the Net Device uses to throttle packet
+diff --git a/contrib/satellite-network/model/point-to-point-laser-channel.cc b/contrib/satellite-network/model/point-to-point-laser-channel.cc
+index 616c202..ecd612f 100644
+--- a/contrib/satellite-network/model/point-to-point-laser-channel.cc
++++ b/contrib/satellite-network/model/point-to-point-laser-channel.cc
+@@ -22,6 +22,7 @@
+ 
+ 
+ #include "point-to-point-laser-channel.h"
++#include "ns3/link-scenario-helper.h"
+ #include "ns3/core-module.h"
+ 
+ namespace ns3 {
+@@ -105,7 +106,7 @@ PointToPointLaserChannel::TransmitStart (
+ 
+   Simulator::ScheduleWithContext (m_link[wire].m_dst->GetNode()->GetId (),
+                                   txTime + delay, &PointToPointLaserNetDevice::Receive,
+-                                  m_link[wire].m_dst, p->Copy ());
++                                  m_link[wire].m_dst, LinkScenarioHelper::CopyForReceive(p, src->GetNode()->GetId()));
+ 
+   // Call the tx anim callback on the net device
+   m_txrxPointToPoint (p, src, m_link[wire].m_dst, txTime, txTime + delay);
+diff --git a/contrib/satellite-network/model/point-to-point-laser-net-device.cc b/contrib/satellite-network/model/point-to-point-laser-net-device.cc
+index 760dc85..dcb0c53 100644
+--- a/contrib/satellite-network/model/point-to-point-laser-net-device.cc
++++ b/contrib/satellite-network/model/point-to-point-laser-net-device.cc
+@@ -33,6 +33,7 @@
+ #include "ns3/pointer.h"
+ #include "ns3/ppp-header.h"
+ #include "point-to-point-laser-net-device.h"
++#include "ns3/link-scenario-helper.h"
+ #include "point-to-point-laser-channel.h"
+ 
+ namespace ns3 {
+@@ -238,6 +239,18 @@ PointToPointLaserNetDevice::SetInterframeGap (Time t)
+   m_tInterframeGap = t;
+ }
+ 
++void
++PointToPointLaserNetDevice::SetScenarioRateCap (DataRate bps)
++{
++  m_scenarioRateCap = bps;
++}
++
++DataRate
++PointToPointLaserNetDevice::GetEffectiveDataRate () const
++{
++  return m_scenarioRateCap.GetBitRate() && m_scenarioRateCap < m_bps ? m_scenarioRateCap : m_bps;
++}
++
+ bool
+ PointToPointLaserNetDevice::TransmitStart (Ptr<Packet> p)
+ {
+@@ -255,7 +268,7 @@ PointToPointLaserNetDevice::TransmitStart (Ptr<Packet> p)
+   m_phyTxBeginTrace (m_currentPkt);
+   TrackUtilization(true);
+ 
+-  Time txTime = m_bps.CalculateBytesTxTime (p->GetSize ());
++  Time txTime = GetEffectiveDataRate().CalculateBytesTxTime (p->GetSize ());
+   Time txCompleteTime = txTime + m_tInterframeGap;
+ 
+   NS_LOG_LOGIC ("Schedule TransmitCompleteEvent in " << txCompleteTime.GetSeconds () << "sec");
+@@ -342,7 +355,8 @@ PointToPointLaserNetDevice::Receive (Ptr<Packet> packet)
+   NS_LOG_FUNCTION (this << packet);
+   uint16_t protocol = 0;
+ 
+-  if (m_receiveErrorModel && m_receiveErrorModel->IsCorrupt (packet) ) 
++  if (LinkScenarioHelper::ShouldDrop(GetNode()->GetId(), packet) ||
++      (m_receiveErrorModel && m_receiveErrorModel->IsCorrupt (packet)))
+     {
+       // 
+       // If we have an error model and it indicates that it is time to lose a
+diff --git a/contrib/satellite-network/model/point-to-point-laser-net-device.h b/contrib/satellite-network/model/point-to-point-laser-net-device.h
+index 45fd6fc..18a0d4e 100644
+--- a/contrib/satellite-network/model/point-to-point-laser-net-device.h
++++ b/contrib/satellite-network/model/point-to-point-laser-net-device.h
+@@ -87,6 +87,8 @@ public:
+    * \param bps the data rate at which this object operates
+    */
+   void SetDataRate (DataRate bps);
++  void SetScenarioRateCap (DataRate bps);
++  DataRate GetEffectiveDataRate () const;
+ 
+   /**
+    * Set the interframe gap used to separate packets.  The interframe gap
+@@ -297,6 +299,7 @@ private:
+    * timing.
+    */
+   DataRate       m_bps;
++  DataRate       m_scenarioRateCap {0}; // Zero means no scenario limit.
+ 
+   /**
+    * The interframe gap that the Net Device uses to throttle packet
+diff --git a/scratch/main_satnet/main_satnet.cc b/scratch/main_satnet/main_satnet.cc
+index 774f5c1..3a24724 100644
+--- a/scratch/main_satnet/main_satnet.cc
++++ b/scratch/main_satnet/main_satnet.cc
+@@ -39,6 +39,7 @@
+ #include "ns3/arbiter-single-forward-helper.h"
+ #include "ns3/ipv4-arbiter-routing-helper.h"
+ #include "ns3/gsl-if-bandwidth-helper.h"
++#include "ns3/link-scenario-helper.h"
+ 
+ using namespace ns3;
+ 
+@@ -78,6 +79,7 @@ int main(int argc, char *argv[]) {
+     Ptr<TopologySatelliteNetwork> topology = CreateObject<TopologySatelliteNetwork>(basicSimulation, Ipv4ArbiterRoutingHelper());
+     ArbiterSingleForwardHelper arbiterHelper(basicSimulation, topology->GetNodes());
+     GslIfBandwidthHelper gslIfBandwidthHelper(basicSimulation, topology->GetNodes());
++    LinkScenarioHelper linkScenario(basicSimulation, topology);
+ 
+     // Schedule flows
+     TcpFlowScheduler tcpFlowScheduler(basicSimulation, topology); // Requires enable_tcp_flow_scheduler=true
+@@ -90,6 +92,7 @@ int main(int argc, char *argv[]) {
+ 
+     // Run simulation
+     basicSimulation->Run();
++    linkScenario.Finish();
+ 
+     // Write flow results
+     tcpFlowScheduler.WriteResults();

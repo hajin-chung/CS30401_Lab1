@@ -1,0 +1,19 @@
+# Scheduled outgoing interface capacity caps; times are simulation seconds.
+# node_id,link_type,peer_id,start_s,end_s,capacity_mbps
+# Active on [start_s,end_s); capacity must be positive (no zero-rate outages).
+# Example state: satellites 0-1583, Seoul=1584, London=1585.
+# link_type: isl (satellite-satellite) or gsl (ground-satellite).
+# peer_id: adjacent ISL peer or * for each matching interface. GSL requires *.
+# * caps each interface, not aggregate satellite bandwidth. Only outgoing traffic
+# is affected; reverse traffic needs its own row. The link must carry the flow.
+# Effective rate = min(current base rate, all active caps). Caps survive state
+# reloads; ending the last cap restores the current base rate. Already-transmitting
+# packets finish at their original rate; queued packets are retained.
+# This reduces service capacity: queues can grow and possibly overflow. It does
+# not model competing TCP senders or establish fairness results.
+#
+# Seoul's outgoing GSL stays on the flow's path despite satellite handovers.
+1584,gsl,*,20,25,5
+# Examples for other studies (ensure these nodes/links carry your flow):
+# 17,isl,*,10,15,20
+# 42,isl,43,15,18,10
