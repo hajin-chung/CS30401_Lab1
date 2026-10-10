@@ -54,6 +54,32 @@ Results are in `logs_ns3/`, console output in `out.txt`. `finished.txt=Yes` mean
 success; the 100 GB flow normally remains ongoing. CubicNew also logs
 `isl-route-ecn.csv` and `tcp-ece.csv`.
 
+### Handover loss
+
+The 30, 100, and 200 ms schedules for the supplied 200 s Seoul–London state are
+in `code/scenario/`, alongside `handovers.csv`.
+
+```bash
+python3 code/prepare_run.py results/handover-100ms --cc TcpCubicNew --duration 200 \
+  --loss code/scenario/loss_100ms.txt
+run_sim.sh "$PWD/results/handover-100ms"
+```
+
+To generate another set into a new directory:
+
+```bash
+python3 code/generate_handover_loss.py results/new-handover-loss --duration 200
+```
+
+Each path change causes 100% loss on `[handover − window, handover + 1 ns)`;
+loss is zero otherwise. Only the two ground stations' outgoing GSLs are targeted
+(`src,gsl,*` and `dst,gsl,*`), covering data and ACKs. Overlaps are merged;
+`handovers.csv` records all path changes, including ISL changes.
+Use `--state`, `--src`, and `--dst` for other states/flows; generate for the same
+duration as the run. Loss is checked at GSL reception; packets already beyond
+those uplinks can continue, and queues are not flushed. Other flows using the
+same ground-station GSLs are also affected.
+
 ## Checks
 
 ```bash
@@ -67,6 +93,7 @@ cd "$submission_dir"
 python3 "$NS3_DIR/utils/verify-cubic-new-ecn.py" \
   --regression "$PWD/results/ecn2-checks" --state "$STATE_EXAMPLE"
 python3 code/test/verify_simulation.py results/scenario-checks
+python3 -m unittest discover -s code/test -p 'test_*.py'
 ```
 
 Use new check directories. To verify a completed CubicNew run, pass its directory
