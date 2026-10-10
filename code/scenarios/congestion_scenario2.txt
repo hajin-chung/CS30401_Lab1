@@ -1,0 +1,6 @@
+# Outgoing capacity caps: node_id,link_type,peer_id,start_s,end_s,capacity_mbps
+# link_type: gsl or isl. GSL requires *; ISL accepts an adjacent peer or *.
+# Windows are [start,end) seconds; rates must be positive. Overlaps use the
+# lowest cap; ending all caps restores the current base rate. Queues are retained.
+# Example state: satellites 0-1583, Seoul=1584, London=1585.
+1584,gsl,*,40,45,5

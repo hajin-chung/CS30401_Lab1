@@ -1,22 +1,9 @@
-# First non-comment line: base_loss_rate=<probability> (a bare number also works).
-# Remaining rows: node_id,link_type,peer_id,start_s,end_s,loss_rate.
-# Targets match congestion_scenario.txt: outgoing isl/gsl interfaces, an adjacent
-# ISL peer or * for all matching interfaces. GSL requires *. Reverse traffic
-# needs a separate row. Example state: satellites 0-1583, Seoul=1584, London=1585.
-# Rates are in [0,1]: 0.01 = 1%, 1 = 100%. Windows are [start,end), within the
-# run duration, and must not overlap on the same interface (including * targets).
-# Rows may be unordered; different interfaces may have simultaneous windows.
-# Base loss applies ONLY to interfaces listed below; unlisted links have no
-# injected loss. Each window replaces the base rate, including zero-loss windows.
-# Drops are evaluated at reception using the packet's outgoing sender interface.
-# Applies to any packet in that direction, whether data or ACK.
-# This is per-link probability, not an exact drop quota or end-to-end percentage.
-# Uses prepare_run.py --seed for repeatable packet draws; no event generator needed.
-# Existing loss logs are reused: peak/peak_attempts mean an explicit interval here.
+# First line: base_loss_rate=<probability>, applied only to listed interfaces.
+# Rows: node_id,link_type,peer_id,start_s,end_s,loss_rate
+# Outgoing gsl/isl targets: GSL requires *; ISL accepts an adjacent peer or *.
+# Non-overlapping [start,end) windows must fit the run. Rates are in [0,1].
+# Windows replace the base rate; afterward it resumes. Reverse links need a row.
+# Loss is sampled per packet at reception; --seed makes runs repeatable.
 base_loss_rate=0.00001
-
-# node_id,link_type,peer_id,start_s,end_s,loss_rate
 1584,gsl,*,10,10.1,1
 1584,gsl,*,20,25,0.01
-# Example ISL target (ensure this link carries your flow):
-# 42,isl,43,15,18,0.01

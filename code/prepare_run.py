@@ -1,25 +1,8 @@
-"""Prepare one experiment with the course make_run.sh; does not run ns-3.
+"""Prepare a course-container run; scenario files are copied into its directory.
 
-Creates config_ns3.properties and schedule.csv for one 100 GB bulk flow. Defaults:
-supplied Seoul-London state, CUBIC, 30 s, 100 Mbps links, 100-packet queues, source
-1584, destination 1585, seed 123456789. Only BBR enables pacing. Use --help for CLI.
-
-Optional scenario inputs are copied into the run, so later edits to the originals
-do not change it. Existing runs are never overwritten. Added config keys are
-link_congestion_scenario_file, link_loss_scenario_file, link_scenario_log_interval_ms.
-Missing scenario keys disable that model; relative paths resolve against the run.
-
-After run_sim.sh, logs_ns3 contains TCP progress (cumulative acknowledged bytes),
-smoothed RTT, and congestion-window CSVs. ACK goodput is the progress difference
-divided by elapsed time, not transmitted bytes. Added CSVs have unit headers:
-  scenario_capacity.csv: cap transitions and effective rates.
-  scenario_queues.csv: occupancy/rates on capacity-targeted interfaces.
-  scenario_queue_drops.csv: queue-drop callbacks on those interfaces only.
-  scenario_link_loss.csv: per-directed-link attempts, errors, peak exposure, and
-    expected errors per interval (not end-to-end application loss).
-  scenario_link_drops.csv: individual injected errors and probability/peak state.
-finished.txt=Yes means simulation completion; the large bulk flow normally stays
-NO_ONGOING. Simulator console output is retained in out.txt.
+Defaults: CUBIC, 30 s, 100 Mbps, 100-packet queues, Seoul (1584) to London (1585).
+Use --cc TcpCubicNew for ECN2 handover control. Only BBR enables pacing.
+Run with run_sim.sh afterward; existing output directories are rejected.
 """
 import argparse
 import os
@@ -32,7 +15,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("--state", default=os.environ.get("STATE_EXAMPLE"), required=not os.environ.get("STATE_EXAMPLE"))
-    parser.add_argument("--cc", default="TcpCubic")
+    parser.add_argument("--cc", default="TcpCubic", help="TCP algorithm, e.g. TcpCubicNew, TcpCubic, TcpNewReno, TcpBbr, TcpVegas")
     parser.add_argument("--duration", type=int, default=30)
     parser.add_argument("--rate-mbps", type=float, default=100)
     parser.add_argument("--queue-pkts", type=int, default=100)

@@ -1,5 +1,7 @@
 .work/
-results/
+results/*
+!results/experiments.sh
+!results/plot_run.py
 code/.venv/
 **/__pycache__/
 *.zip

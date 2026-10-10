@@ -1,14 +1,7 @@
-"""Integration checks on the course constellation; run inside the lab container.
+"""Check scheduled loss, capacity caps, seeded replay, and invalid inputs.
 
-Usage from the submission root:
+Run inside the patched container with a new output directory:
     python3 code/test/verify_simulation.py results/verification
-
-Requires the scenario patch to be applied and built. Uses a new output directory
-and short simulations (about three minutes). Checks zero-loss TCP equivalence,
-targeted loss rates/direction, base-rate restoration, seeded replay, error frequency,
-GSL/ISL selectors, a 100% drop window, and invalid loss schedules. Also checks GSL cap persistence,
-overlap/restoration, time-zero ISL caps, queue buildup, and invalid targets.
-Test inputs and logs remain in the output directory for inspection.
 """
 import argparse
 import csv
@@ -46,7 +39,6 @@ def main():
         return target / "logs_ns3"
 
     baseline = run("baseline")
-
     def schedule(name, contents):
         path = output / f"{name}.txt"
         path.write_text(contents)
