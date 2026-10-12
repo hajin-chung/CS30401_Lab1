@@ -125,7 +125,7 @@ def main():
         for path in sorted(paths):
             run = Run(path)
             summary, f, e, h = measure(run, args.warmup, args.bin_seconds, args.recovery_fraction, args.hold_bins)
-            identity = dict(run=str(path), **{k: run.meta.get(k) for k in ('case_id', 'profile', 'loss_ms', 'loss_timing')})
+            identity = dict(run=str(path), **{k: run.meta.get(k) for k in ('case_id', 'purpose', 'profile', 'loss_ms', 'loss_timing')})
             summaries.append(identity | summary)
             for target, source in ((flows, f), (epochs, e), (handovers, h)):
                 target.extend(identity | row for row in source)
@@ -136,12 +136,13 @@ def main():
     for row in summaries:
         if row['cc'] == args.baseline and row['case_id']:
             if row['case_id'] in baselines:
-                parser.error('Ambiguous duplicate baseline case; score each matrix separately')
+                parser.error('Ambiguous duplicate baseline case; score each experiment set separately')
             baselines[row['case_id']] = row
     for row in summaries:
         baseline = baselines.get(row['case_id'])
         if baseline and row['cc'] != args.baseline:
-            comparison = dict(run=row['run'], baseline_run=baseline['run'], case_id=row['case_id'], cc=row['cc'])
+            comparison = dict(run=row['run'], baseline_run=baseline['run'], case_id=row['case_id'], cc=row['cc'],
+                              purpose=row['purpose'], profile=row['profile'], loss_ms=row['loss_ms'], flows=row['flows'])
             for metric in ('goodput_mbps', 'srtt_flow_mean_ms', 'jain_goodput', 'zero_goodput_fraction', 'queue_drop_packets'):
                 a, b = row[metric], baseline[metric]
                 comparison[metric + '_delta'] = a - b if a is not None and b is not None else None

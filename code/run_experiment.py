@@ -1,4 +1,4 @@
-"""Generate matched scenarios, run ns-3, plot each run, and export scores."""
+"""Run 33 focused experiments, plot each run, and export scores."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
@@ -19,14 +19,26 @@ EXPERIMENT = dict(
     duration=200,
     src=1584, dst=1585,
     cc=['TcpCubic', 'TcpCubicNew', 'TcpBbr'],
-    profiles=['constant', 'drop', 'rise', 'alternating', 'random'],
-    loss_ms=[0, 30, 100, 200],
     loss_timing='after', handover_kind='all',
-    flow_counts=[1, 4], seeds=[123456789],
+    seeds=[123456789],
     rate_mbps=100, low_mbps=20, high_mbps=100,
     queue_pkts=100, log_interval_ms=10,
     jobs=2,
 )
+# Each condition is compared across all three algorithms.
+CASES = [
+    ('constant', 0, 1, 'restart_cost'),
+    ('constant', 30, 1, 'outage_duration'),
+    ('constant', 100, 1, 'outage_duration'),
+    ('constant', 200, 1, 'outage_duration'),
+    ('drop', 0, 1, 'capacity_change'),
+    ('rise', 0, 1, 'capacity_change'),
+    ('drop', 100, 1, 'combined_effects'),
+    ('rise', 100, 1, 'combined_effects'),
+    ('constant', 100, 4, 'fairness'),
+    ('drop', 100, 4, 'fairness'),
+    ('rise', 100, 4, 'fairness'),
+]
 
 
 def call(script, *args, **kwargs):
@@ -82,9 +94,10 @@ def main():
     output = args.output.resolve()
     output.mkdir(parents=True)
     scenarios = output / 'scenarios'
-    write_scenarios(scenarios / 'loss', events, duration, args.loss_timing, args.loss_ms)
+    loss_ms_values = sorted({loss_ms for _, loss_ms, _, _ in CASES})
+    write_scenarios(scenarios / 'loss', events, duration, args.loss_timing, loss_ms_values)
     handovers = scenarios / 'loss/handovers.csv'
-    source_files = sorted(CODE.glob('*.py')) + sorted((CODE / 'scenarios').glob('*.py')) + [CODE / 'patch/ns3.patch']
+    source_files = sorted(CODE.glob('*.py')) + sorted((CODE / 'scenarios').glob('*.py')) + sorted((CODE / 'patch').glob('*.patch'))
     # Hash the routing inputs once, so comparisons identify the actual state used.
     state_digest = hashlib.sha256()
     for path in [state / 'tles.txt', state / 'ground_stations.txt', *[routes / f'fstate_{t}.txt' for t in range(0, duration, interval)]]:
@@ -93,15 +106,19 @@ def main():
     settings = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
     manifest = dict(settings=settings, state_sha256=state_digest.hexdigest(),
                     source_sha256={str(path.relative_to(CODE)): fingerprint(path) for path in source_files},
+                    cases=[dict(profile=profile, loss_ms=loss_ms, flows=flows, purpose=purpose)
+                           for profile, loss_ms, flows, purpose in CASES],
                     handovers=len(events), python=sys.version)
     (output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     if not events:
         print('Warning: no handovers in this duration; capacity transitions and outages will not occur.', flush=True)
     runs = []
-    for seed, profile in itertools.product(args.seeds, args.profiles):
+    for seed, profile in itertools.product(args.seeds, sorted({case[0] for case in CASES})):
         scenario = scenarios / f'{profile}-s{seed}'
         generate(scenario, handovers, duration, args.src, profile, args.low_mbps, args.high_mbps, seed)
-        for loss_ms, flows, cc in itertools.product(args.loss_ms, args.flow_counts, args.cc):
+    for seed, (profile, loss_ms, flows, purpose) in itertools.product(args.seeds, CASES):
+        scenario = scenarios / f'{profile}-s{seed}'
+        for cc in args.cc:
             name = f'{cc}-{profile}-loss{loss_ms}-n{flows}-s{seed}'
             run = output / name
             call('prepare_run.py', run, '--state', state, '--duration', args.duration, '--cc', cc,
@@ -119,7 +136,7 @@ def main():
                             congestion_sha256=fingerprint(run / 'congestion_scenario.txt'),
                             loss_sha256=fingerprint(run / 'loss_scenario.txt'))
             identity['case_id'] = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:20]
-            (run / 'experiment.json').write_text(json.dumps(identity | {'cc': cc}, indent=2) + '\n')
+            (run / 'experiment.json').write_text(json.dumps(identity | {'cc': cc, 'purpose': purpose}, indent=2) + '\n')
             runs.append(run)
     print(f'Prepared {len(runs)} runs; {len(events)} handovers. Output: {output}', flush=True)
     subprocess.run([str(ns3 / 'ns3'), 'build'], cwd=ns3, check=True)

@@ -1,6 +1,7 @@
 """Synthetic checks for epoch boundaries and measurement semantics."""
 import csv
 import json
+from collections import Counter
 from pathlib import Path
 import subprocess
 import sys
@@ -12,6 +13,7 @@ from extract_metrics import measure
 from scenarios.generate_congestion import capacities, generate
 from scenarios.generate_handover_loss import Handover, loss_windows, select_handovers
 from run_data import Run, edges, goodput, jain, time_stats
+from run_experiment import CASES, EXPERIMENT
 
 
 class ExperimentTest(unittest.TestCase):
@@ -19,6 +21,23 @@ class ExperimentTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+
+    def test_focused_cases_have_matched_controls(self):
+        conditions = {(profile, loss, flows) for profile, loss, flows, _ in CASES}
+        self.assertEqual(len(conditions), len(CASES))
+        self.assertEqual(len(CASES) * len(EXPERIMENT['cc']) * len(EXPERIMENT['seeds']), 33)
+        self.assertEqual(set(EXPERIMENT['cc']), {'TcpCubic', 'TcpCubicNew', 'TcpBbr'})
+        self.assertEqual(Counter(purpose for *_, purpose in CASES),
+                         dict(restart_cost=1, outage_duration=3, capacity_change=2,
+                              combined_effects=2, fairness=3))
+        for profile, loss, flows in conditions:
+            self.assertIn(profile, {'constant', 'drop', 'rise'})
+            if flows == 4:
+                self.assertEqual(loss, 100)
+                self.assertIn((profile, loss, 1), conditions)
+            if profile != 'constant':
+                self.assertIn(('constant', loss, flows), conditions)
+                self.assertIn((profile, 0, 1), conditions)
 
     def test_post_handover_loss_merges_and_clips(self):
         path = ((4, 0, 0, 1), (0, 5, 1, 0))
@@ -93,6 +112,7 @@ class ExperimentTest(unittest.TestCase):
 
     def test_metrics_cli_and_warmup(self):
         path = self.fixture()
+        (path / 'experiment.json').write_text(json.dumps(dict(purpose='fairness', profile='drop', loss_ms=100)))
         summary, _, epochs, events = measure(Run(path), start=3, bin_s=1)
         self.assertEqual(summary['goodput_mbps'], 2)
         self.assertEqual(len(epochs), 1)
@@ -102,7 +122,9 @@ class ExperimentTest(unittest.TestCase):
                                  str(path), '--output', str(output)], text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         with (output / 'summary.csv').open() as stream:
-            self.assertEqual(len(list(csv.DictReader(stream))), 1)
+            rows = list(csv.DictReader(stream))
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]['purpose'], 'fairness')
         self.assertEqual(json.loads((output / 'measurement.json').read_text())['hold_bins'], 3)
 
     def test_completed_or_staggered_flows_do_not_get_bulk_fairness(self):

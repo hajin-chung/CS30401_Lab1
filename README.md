@@ -13,9 +13,18 @@
    python3 code/run_experiment.py
    ```
 
-   This runs the fixed 120-experiment matrix: CUBIC/CubicNew/BBR, five capacity
-   profiles, 0/30/100/200 ms outages, and 1/4 flows. Each simulation lasts 200 s.
+   This runs 33 experiments: 11 conditions, each with CUBIC/CubicNew/BBR.
+   Each simulation lasts 200 s.
    Scenarios, plots, and scores are generated automatically.
+
+   | Purpose | Capacity | Outage (ms) | Flows | Runs |
+   | --- | --- | --- | --- | --- |
+   | Restart cost | Constant | 0 | 1 | 3 |
+   | Outage duration | Constant | 30, 100, 200 | 1 | 9 |
+   | Capacity change | Drop, rise | 0 | 1 | 6 |
+   | Combined effects | Drop, rise | 100 | 1 | 6 |
+   | Fairness | Constant, drop, rise | 100 | 4 | 9 |
+
    By default, two experiments run in parallel. To use eight:
 
    ```bash
@@ -27,7 +36,7 @@
    | File | Contents |
    | --- | --- |
    | `<run>/overview.png` | Handover, congestion, loss, and TCP plots |
-   | `metrics/summary.csv` | Goodput, RTT, fairness, stalls, and drops |
+   | `metrics/summary.csv` | Goodput, RTT, fairness, stalls, and drops; filter by `purpose` |
    | `metrics/comparisons.csv` | Matched comparisons against CUBIC |
    | `metrics/flows.csv` | Per-flow scores |
    | `metrics/epochs.csv` | Per-epoch scores |
