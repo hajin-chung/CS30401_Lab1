@@ -3,14 +3,14 @@
 # Already-applied patches are accepted; conflicts leave source files untouched.
 set -euo pipefail
 : "${NS3_DIR:?Run inside the course Docker image}"
-CODE_DIR=$(cd "$(dirname "$0")" && pwd)
+PATCH_DIR=$(cd "$(dirname "$0")/patch" && pwd)
 cd "$NS3_DIR"
-if git apply --reverse --check "$CODE_DIR/ns3.patch" 2>/dev/null; then
+if git apply --reverse --check "$PATCH_DIR/ns3.patch" 2>/dev/null; then
     echo "Merged ns-3 patch is already applied."
-elif git apply --check "$CODE_DIR/ns3.patch" 2>/dev/null; then
-    git apply "$CODE_DIR/ns3.patch"
-elif git apply --check "$CODE_DIR/ecn2-upgrade.patch" 2>/dev/null; then
-    git apply "$CODE_DIR/ecn2-upgrade.patch"
+elif git apply --check "$PATCH_DIR/ns3.patch" 2>/dev/null; then
+    git apply "$PATCH_DIR/ns3.patch"
+elif git apply --check "$PATCH_DIR/ecn2-upgrade.patch" 2>/dev/null; then
+    git apply "$PATCH_DIR/ecn2-upgrade.patch"
 else
     echo "Cannot apply the merged patch to this source tree." >&2
     echo "Use a fresh course ns-3.48 tree or resolve local edits first (see README)." >&2

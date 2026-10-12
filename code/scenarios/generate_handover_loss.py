@@ -85,10 +85,21 @@ def merge_windows(windows):
     return merged
 
 
-def loss_windows(events, lead_ns, duration_ns):
+def select_handovers(events, kind):
+    if kind == 'all':
+        return events
+    return [event for event in events if any(
+        (old[0], old[-1]) != (new[0], new[-1])
+        for old, new in zip(event.before, event.after))]
+
+
+def loss_windows(events, lead_ns, duration_ns, timing='before'):
     windows = {}
     for event in events:
-        start, end = max(0, event.time_ns - lead_ns), min(duration_ns, event.time_ns + 1)
+        if timing == 'after':
+            start, end = event.time_ns, min(duration_ns, event.time_ns + lead_ns)
+        else:
+            start, end = max(0, event.time_ns - lead_ns), min(duration_ns, event.time_ns + 1)
         for path in event.before:
             key = (path[0][0], 'gsl', '*')
             windows.setdefault(key, []).append((start, end))
@@ -121,7 +132,7 @@ def load_state(state, routes, duration_ns):
     return routes, interval_ns, duration_ns, num_sats, num_sats + len(grounds)
 
 
-def write_scenarios(output, events, duration_ns):
+def write_scenarios(output, events, duration_ns, timing='before', windows_ms=(30, 100, 200)):
     output.mkdir(parents=True, exist_ok=False)
     with (output / 'handovers.csv').open('w', newline='') as stream:
         writer = csv.writer(stream)
@@ -131,10 +142,12 @@ def write_scenarios(output, events, duration_ns):
                 if old != new:
                     paths = ['>'.join(map(str, [p[0][0]] + [hop[1] for hop in p])) for p in (old, new)]
                     writer.writerow([seconds(event.time_ns), old[0][0], old[-1][1], *paths])
-    for lead_ms in (30, 100, 200):
-        windows = loss_windows(events, lead_ms * 1_000_000, duration_ns)
+    for lead_ms in windows_ms:
+        windows = loss_windows(events, lead_ms * 1_000_000, duration_ns, timing) if lead_ms else {}
         with (output / f'loss_{lead_ms}ms.txt').open('w') as stream:
-            stream.write(f'# 100% loss on [handover - {lead_ms} ms, handover + 1 ns).\n'
+            interval = (f'[handover, handover + {lead_ms} ms)' if timing == 'after'
+                        else f'[handover - {lead_ms} ms, handover + 1 ns)')
+            stream.write(f'# 100% loss on {interval}.\n'
                          '# Both ground stations: outgoing GSLs only. Overlapping windows are merged.\n'
                          '# node_id,link_type,peer_id,start_s,end_s,loss_rate\n'
                          'base_loss_rate=0\n')
@@ -152,18 +165,25 @@ def main():
     parser.add_argument('--duration', type=nanoseconds, help='simulation seconds (default: full state)')
     parser.add_argument('--src', type=int, default=1584)
     parser.add_argument('--dst', type=int, default=1585)
+    parser.add_argument('--timing', choices=['before', 'after'], default='before',
+                        help='legacy default: before; new experiments use after')
+    parser.add_argument('--handover-kind', choices=['all', 'gsl'], default='all')
+    parser.add_argument('--windows-ms', type=int, nargs='+', default=[30, 100, 200])
     args = parser.parse_args()
     if args.output.exists():
         parser.error('Output already exists; choose a new directory')
+    if any(ms < 0 for ms in args.windows_ms):
+        parser.error('Loss windows must be nonnegative')
     try:
         routes, interval, duration, num_sats, node_count = load_state(args.state, args.routes, args.duration)
         if args.src == args.dst or not all(num_sats <= n < node_count for n in (args.src, args.dst)):
             raise ValueError('Source and destination must be distinct ground-station node IDs')
         events = detect_handovers(routes, interval, duration, args.src, args.dst, node_count)
-        write_scenarios(args.output, events, duration)
+        events = select_handovers(events, args.handover_kind)
+        write_scenarios(args.output, events, duration, args.timing, args.windows_ms)
     except (OSError, ValueError) as error:
         parser.error(str(error))
-    print(f'Detected {len(events)} handover times; wrote 3 loss scenarios and handovers.csv to {args.output}')
+    print(f'Detected {len(events)} handover times; wrote {len(args.windows_ms)} loss scenarios to {args.output}')
 
 
 if __name__ == '__main__':
