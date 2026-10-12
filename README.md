@@ -16,6 +16,11 @@
    This runs the fixed 120-experiment matrix: CUBIC/CubicNew/BBR, five capacity
    profiles, 0/30/100/200 ms outages, and 1/4 flows. Each simulation lasts 200 s.
    Scenarios, plots, and scores are generated automatically.
+   By default, two experiments run in parallel. To use eight:
+
+   ```bash
+   python3 code/run_experiment.py --jobs 8
+   ```
 
 3. Open `results/experiments/` on your host computer:
 

@@ -55,12 +55,17 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('output', nargs='?', type=Path, default=CODE.parent / 'results/experiments',
                    help='new output directory (default: results/experiments)')
+    p.add_argument('--jobs', type=int, default=EXPERIMENT['jobs'],
+                   help='parallel experiments (default: 2)')
     args = p.parse_args()
+    if args.jobs < 1:
+        p.error('--jobs must be a positive integer')
     if args.output.exists():
         p.error('Output exists; pass a new directory, e.g. python3 code/run_experiment.py results/repeat')
     if not all(os.environ.get(key) for key in ('LAB', 'NS3_DIR', 'STATE_EXAMPLE')):
         p.error('Run inside the course container; see README.md')
-    args = argparse.Namespace(**EXPERIMENT, output=args.output, state=Path(os.environ['STATE_EXAMPLE']))
+    args = argparse.Namespace(**(EXPERIMENT | {'jobs': args.jobs}),
+                              output=args.output, state=Path(os.environ['STATE_EXAMPLE']))
     ns3 = Path(os.environ['NS3_DIR']).resolve()
     try:
         import matplotlib  # noqa: F401
