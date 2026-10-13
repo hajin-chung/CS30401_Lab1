@@ -25,19 +25,19 @@ class ExperimentTest(unittest.TestCase):
     def test_focused_cases_have_matched_controls(self):
         conditions = {(profile, loss, flows) for profile, loss, flows, _ in CASES}
         self.assertEqual(len(conditions), len(CASES))
-        self.assertEqual(len(CASES) * len(EXPERIMENT['cc']) * len(EXPERIMENT['seeds']), 33)
+        self.assertEqual(len(CASES) * len(EXPERIMENT['cc']) * len(EXPERIMENT['seeds']), 24)
         self.assertEqual(set(EXPERIMENT['cc']), {'TcpCubic', 'TcpCubicNew', 'TcpBbr'})
         self.assertEqual(Counter(purpose for *_, purpose in CASES),
-                         dict(restart_cost=1, outage_duration=3, capacity_change=2,
-                              combined_effects=2, fairness=3))
+                         dict(outage_duration=3, combined_effects=2, fairness=3))
         for profile, loss, flows in conditions:
             self.assertIn(profile, {'constant', 'drop', 'rise'})
+            self.assertIn(loss, {30, 100, 200})
             if flows == 4:
                 self.assertEqual(loss, 100)
                 self.assertIn((profile, loss, 1), conditions)
             if profile != 'constant':
                 self.assertIn(('constant', loss, flows), conditions)
-                self.assertIn((profile, 0, 1), conditions)
+                self.assertEqual(loss, 100)
 
     def test_post_handover_loss_merges_and_clips(self):
         path = ((4, 0, 0, 1), (0, 5, 1, 0))

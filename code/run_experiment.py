@@ -1,4 +1,4 @@
-"""Run 33 focused experiments, plot each run, and export scores."""
+"""Run 24 focused experiments, plot each run, and export scores."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
@@ -27,12 +27,9 @@ EXPERIMENT = dict(
 )
 # Each condition is compared across all three algorithms.
 CASES = [
-    ('constant', 0, 1, 'restart_cost'),
     ('constant', 30, 1, 'outage_duration'),
     ('constant', 100, 1, 'outage_duration'),
     ('constant', 200, 1, 'outage_duration'),
-    ('drop', 0, 1, 'capacity_change'),
-    ('rise', 0, 1, 'capacity_change'),
     ('drop', 100, 1, 'combined_effects'),
     ('rise', 100, 1, 'combined_effects'),
     ('constant', 100, 4, 'fairness'),

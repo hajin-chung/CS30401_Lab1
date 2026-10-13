@@ -2,6 +2,8 @@
 
 1. From the submission directory, start the course container:
 
+   We ran this command in a macOS terminal; it has not been tested on Windows.
+
    ```bash
    docker run --rm -it -v "$PWD":/work -w /work ghcr.io/yeonjong21/cs30401-lab1:2026f-v1 bash
    ```
@@ -13,15 +15,14 @@
    python3 code/run_experiment.py
    ```
 
-   This runs 33 experiments: 11 conditions, each with CUBIC/CubicNew/BBR.
+   This runs 24 experiments: 8 conditions, each with CUBIC/CubicNew/BBR.
+   Handover outages last 30, 100, or 200 ms.
    Each simulation lasts 200 s.
    Scenarios, plots, and scores are generated automatically.
 
    | Purpose | Capacity | Outage (ms) | Flows | Runs |
    | --- | --- | --- | --- | --- |
-   | Restart cost | Constant | 0 | 1 | 3 |
    | Outage duration | Constant | 30, 100, 200 | 1 | 9 |
-   | Capacity change | Drop, rise | 0 | 1 | 6 |
    | Combined effects | Drop, rise | 100 | 1 | 6 |
    | Fairness | Constant, drop, rise | 100 | 4 | 9 |
 
